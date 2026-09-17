@@ -7,11 +7,17 @@ import dataclasses
 import json
 import sys
 from contextlib import nullcontext
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .benchmark import run_benchmark, write_result
+from .benchmark import (
+    discover_prompt_files,
+    load_prompts,
+    run_benchmark,
+    write_responses_jsonl,
+    write_result,
+)
 from .config import (
     ConfigError,
     ExperimentConfig,
@@ -41,8 +47,14 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("config")
     run.add_argument("--no-launch", action="store_true", help="benchmark an already-running server")
     run.add_argument("--base-url", help="server URL used with --no-launch")
-    run.add_argument("--output", help="result JSON path")
-    run.add_argument("--prompts", help="override the configured JSONL prompt file")
+    run.add_argument(
+        "--output",
+        help="result JSON path, or output directory when --prompts is a directory",
+    )
+    run.add_argument(
+        "--prompts",
+        help="override the configured JSONL prompt file or directory of JSONL files",
+    )
     run.add_argument("--concurrency", type=int)
     run.add_argument("--repetitions", type=int)
     run.add_argument("--max-tokens", type=int)
@@ -81,9 +93,23 @@ def _override(config: ExperimentConfig, args: argparse.Namespace) -> ExperimentC
     return result
 
 
-def _default_output(config: ExperimentConfig) -> Path:
+def _default_output(config: ExperimentConfig, *, directory: bool = False) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return Path("results") / f"{config.name}-{timestamp}.json"
+    suffix = "" if directory else ".json"
+    return Path("results") / f"{config.name}-{timestamp}{suffix}"
+
+
+def _response_output(result_output: Path) -> Path:
+    return result_output.with_name(f"{result_output.stem}.responses.jsonl")
+
+
+def _print_aggregate(label: str, result: dict) -> None:
+    aggregate = result["aggregate"]
+    completed = aggregate["completed_requests"]
+    planned = aggregate["planned_requests"]
+    throughput = aggregate["output_throughput_tokens_per_s"]
+    throughput_text = f"{throughput:.2f}" if throughput is not None else "n/a"
+    print(f"{label}: completed {completed}/{planned}; {throughput_text} output tok/s")
 
 
 def _validate_base_url(value: str) -> str:
@@ -124,8 +150,34 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         config = _override(load_config(args.config), args)
-        output = Path(args.output) if args.output else _default_output(config)
-        log_path = output.with_suffix(".server.log")
+        prompt_source = config.prompt_path()
+        prompt_files = discover_prompt_files(prompt_source)
+        directory_mode = prompt_source.is_dir()
+        if directory_mode and len({item.stem for item in prompt_files}) != len(prompt_files):
+            raise ConfigError(
+                "prompt filenames must have unique stems because output names are stem-based"
+            )
+        # Validate every shard before spending time loading the model onto the GPU.
+        for prompt_file in prompt_files:
+            load_prompts(prompt_file)
+        output = (
+            Path(args.output).expanduser()
+            if args.output
+            else _default_output(config, directory=directory_mode)
+        )
+        if directory_mode:
+            if output.exists() and not output.is_dir():
+                raise ConfigError(
+                    f"directory prompt input requires an output directory, but {output} is a file"
+                )
+            output.mkdir(parents=True, exist_ok=True)
+            log_path = output / "server.log"
+        else:
+            if output.exists() and output.is_dir():
+                raise ConfigError(
+                    f"single prompt file requires an output JSON path, but {output} is a directory"
+                )
+            log_path = output.with_suffix(".server.log")
         base_url = _validate_base_url(args.base_url) if args.base_url else config.base_url
         if args.no_launch:
             if not server_is_ready(base_url):
@@ -137,19 +189,58 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Launching: {render_shell_command(config)}", flush=True)
             print(f"Server log: {log_path}", flush=True)
             manager = ManagedServer(config, log_path)
+        failed_requests = 0
+        manifest_files: list[dict] = []
         with manager:
-            result = run_benchmark(config, base_url=base_url)
-        destination = write_result(result, output)
-        aggregate = result["aggregate"]
-        print(f"Result: {destination}")
-        completed = aggregate["completed_requests"]
-        planned = aggregate["planned_requests"]
-        print(
-            f"Completed {completed}/{planned} requests; "
-            f"{aggregate['output_throughput_tokens_per_s']:.2f} output tok/s"
-        )
-        return 0 if aggregate["failed_requests"] == 0 else 2
-    except (ConfigError, ServerError, ValueError, RuntimeError) as exc:
+            for index, prompt_file in enumerate(prompt_files, 1):
+                if directory_mode:
+                    print(
+                        f"[{index}/{len(prompt_files)}] Benchmarking {prompt_file.name}",
+                        flush=True,
+                    )
+                result = run_benchmark(config, base_url=base_url, prompt_path=prompt_file)
+                failed_requests += result["aggregate"]["failed_requests"]
+
+                if directory_mode:
+                    result_output = output / f"{prompt_file.stem}.result.json"
+                    responses_output = output / f"{prompt_file.stem}.responses.jsonl"
+                else:
+                    result_output = output
+                    responses_output = _response_output(output)
+                destination = write_result(result, result_output)
+                response_destination = write_responses_jsonl(result, responses_output)
+                print(f"Result: {destination}")
+                print(f"Responses: {response_destination}")
+                _print_aggregate(prompt_file.name, result)
+
+                if directory_mode:
+                    manifest_files.append(
+                        {
+                            "input_file": prompt_file.name,
+                            "input_path": str(prompt_file),
+                            "result_json": result_output.name,
+                            "responses_jsonl": responses_output.name,
+                            "workload": result["workload"],
+                            "aggregate": result["aggregate"],
+                            "speculative": result["speculative"],
+                        }
+                    )
+
+        if directory_mode:
+            manifest = {
+                "schema_version": 1,
+                "created_at": datetime.now(UTC).isoformat(),
+                "experiment_name": config.name,
+                "input_directory": str(prompt_source),
+                "server_log": None if args.no_launch else log_path.name,
+                "file_count": len(manifest_files),
+                "failed_requests": failed_requests,
+                "files": manifest_files,
+            }
+            manifest_output = write_result(manifest, output / "manifest.json")
+            print(f"Manifest: {manifest_output}")
+        return 0 if failed_requests == 0 else 2
+    except (ConfigError, ServerError, ValueError, RuntimeError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

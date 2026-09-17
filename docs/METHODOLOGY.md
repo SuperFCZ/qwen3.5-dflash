@@ -30,6 +30,11 @@ the W8 track and the draft was trained against the QAD target.
   dispersion across runs for publication-quality results.
 - Keep clocks, power limit, ambient temperature, and background GPU processes stable.
 
+When `--prompts` points to a directory, the server stays loaded while each JSONL file is
+measured as a separate workload. Every file gets a fresh warm-up and fresh before/after
+counter snapshots, and produces its own result JSON. Keep the same file boundaries and
+names across configurations so results remain directly pairable.
+
 ## 3. Grid
 
 The suggested starting grid is:

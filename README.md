@@ -31,6 +31,7 @@ W4 还绑定了单独训练的 QAD W4 目标模型和可选 SWA。把它们塞�
 
 ```text
 configs/                    六个可复现实验配置
+environment.yml             Conda 环境定义（Python 3.12）
 plugins/dflash_vllm_patch/  vLLM 0.22.1 量化 DFlash + 可选 SWA 插件
 prompts/                    smoke 与 20 条成对基准提示
 src/dflash_bench/           服务管理、请求、指标、GPU 遥测与报告工具
@@ -44,7 +45,7 @@ tests/                      不依赖 GPU 的单元测试
 - Linux x86_64；RTX 3090 24 GB；可被当前 vLLM/CUDA 镜像支持的 NVIDIA 驱动
 - Python 3.12（Nota 的已验证环境为 `>=3.12,<3.13`）
 - 充足磁盘空间和 Hugging Face 访问权限
-- 建议不要在现有训练环境中原地安装；为本仓库创建独立虚拟环境
+- 建议不要在现有训练环境中原地安装；为本仓库创建独立 Conda 环境
 
 先确认 GPU：
 
@@ -52,7 +53,25 @@ tests/                      不依赖 GPU 的单元测试
 nvidia-smi
 ```
 
-### 方式一：独立虚拟环境
+### 方式一：Conda（推荐）
+
+在仓库根目录执行：
+
+```bash
+conda env create -f environment.yml
+conda activate qwen35-dflash
+```
+
+以后依赖文件有更新时，可以原地同步：
+
+```bash
+conda env update -f environment.yml --prune
+```
+
+`environment.yml` 会创建 Python 3.12 环境，并安装固定的 vLLM 栈、本仓库的 DFlash 插件和
+`dflash-bench` 命令。
+
+### 方式二：Python venv
 
 ```bash
 python3.12 -m venv .venv
@@ -66,7 +85,7 @@ python -m pip install -e '.[dev]'
 这里固定 `vllm==0.22.1`，因为两个模型的已知可运行方案和本仓库补丁都针对这个版本。不要在同一
 轮比较中途升级 vLLM、Transformers 或 CUDA 栈。
 
-### 方式二：Docker
+### 方式三：Docker
 
 ```bash
 docker compose build bench
@@ -97,7 +116,8 @@ dflash-bench run configs/w4_draft_full.toml \
 ```
 
 `run` 会启动 vLLM，等待 `/health`，预热，读取一次 `/metrics`，执行测量请求，再读取计数器差值并
-停止服务。服务日志与结果同名，后缀为 `.server.log`。模型首次下载不计入基准时间。
+停止服务。服务日志与结果同名，后缀为 `.server.log`；逐题输出另存为
+`*.responses.jsonl`。模型首次下载不计入基准时间。
 
 如果你已经手工启动了服务：
 
@@ -108,6 +128,54 @@ dflash-bench run configs/w8_draft.toml \
 ```
 
 此时配置仍决定请求模型名和基准参数，但工具不会管理服务进程。
+
+## 使用你的多文件 JSONL 数据集
+
+`--prompts` 既可以指向单个 `.jsonl`，也可以指向包含多个 `.jsonl` 的目录。目录只扫描第一层，
+并按文件名排序。每个非空行必须是一个独立 JSON 对象，支持 `question` 或 `prompt` 字段；`id`
+可选，缺省时自动使用该文件内的行号。比如：
+
+```jsonl
+{"question":"Janet's ducks lay 16 eggs per day. How much does she make?"}
+{"id":"bolts-1","question":"A robe takes 2 bolts of blue fiber and half that much white fiber. How many bolts in total?"}
+```
+
+原始记录里的其他字段（例如标准答案、类别）会原样保存在结果的 `source_record` 中。假设目录为
+`/data/gsm8k_parts/`，可以分别运行两个量化草稿：
+
+```bash
+conda activate qwen35-dflash
+
+dflash-bench run configs/w8_draft.toml \
+  --prompts /data/gsm8k_parts \
+  --repetitions 3 \
+  --output results/w8-gsm8k
+
+dflash-bench run configs/w4_draft_full.toml \
+  --prompts /data/gsm8k_parts \
+  --repetitions 3 \
+  --output results/w4-gsm8k
+```
+
+每条命令只加载一次模型，然后依次测量各个文件。每个文件有独立的预热、Prometheus 前后快照、
+GPU 遥测和聚合指标。输出结构如下：
+
+```text
+results/w8-gsm8k/
+├── manifest.json
+├── server.log
+├── part-000.result.json
+├── part-000.responses.jsonl
+├── part-001.result.json
+└── part-001.responses.jsonl
+```
+
+`*.result.json` 包含完整配置、接受率、吞吐、延迟和显存；`*.responses.jsonl` 方便逐题分析，包含
+输入、模型输出、耗时、token 数以及失败记录。`manifest.json` 汇总所有分片并给出对应文件名。
+目录模式下 `--output` 表示目录，而单文件模式下仍表示结果 JSON 路径。
+
+如果要严格判断“草稿量化”本身的影响，不要直接把 W4 与 W8 相减：应在各自轨道内使用相同数据
+分别跑本 README 开头表格中的 target/baseline/draft 配置，再比较对应分片的结果。
 
 ## 推荐实验顺序
 
@@ -161,7 +229,7 @@ python scripts/run_3090_matrix.py --track all --repetitions 3
 
 ## 结果指标
 
-每个 JSON 保存完整配置、硬件信息、逐请求输出和以下聚合指标：
+每个 `*.result.json` 保存完整配置、硬件信息、逐请求输出和以下聚合指标：
 
 - `mean_accepted_draft_tokens = accepted_draft_tokens / draft_steps`；
 - `mean_acceptance_length = 1 + mean_accepted_draft_tokens`，包含目标模型 bonus token；

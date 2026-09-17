@@ -1,0 +1,12 @@
+name: qwen35-dflash
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip>=24
+  - setuptools>=69
+  - wheel
+  - pip:
+      - -r requirements-vllm.txt
+      - -e ./plugins/dflash_vllm_patch
+      - -e .[dev]

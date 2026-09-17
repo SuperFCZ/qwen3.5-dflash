@@ -11,7 +11,7 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -26,6 +26,33 @@ from .prometheus import parse_prometheus, speculative_stats
 class Prompt:
     prompt_id: str
     text: str
+    input_field: str = "prompt"
+    source_record: dict[str, Any] = field(default_factory=dict)
+
+
+def discover_prompt_files(path: str | Path) -> list[Path]:
+    """Return one JSONL file, or the sorted JSONL files directly inside a directory."""
+    source = Path(path).expanduser().resolve()
+    if source.is_file():
+        if source.suffix.lower() != ".jsonl":
+            raise ValueError(f"prompt file must have a .jsonl suffix: {source}")
+        return [source]
+    if source.is_dir():
+        try:
+            files = sorted(
+                (
+                    item.resolve()
+                    for item in source.iterdir()
+                    if item.is_file() and item.suffix.lower() == ".jsonl"
+                ),
+                key=lambda item: item.name,
+            )
+        except OSError as exc:
+            raise ValueError(f"cannot list prompt directory {source}: {exc}") from exc
+        if not files:
+            raise ValueError(f"prompt directory {source} contains no .jsonl files")
+        return files
+    raise ValueError(f"prompt path does not exist: {source}")
 
 
 def load_prompts(path: str | Path) -> list[Prompt]:
@@ -44,14 +71,25 @@ def load_prompts(path: str | Path) -> list[Prompt]:
             item = json.loads(line)
         except json.JSONDecodeError as exc:
             raise ValueError(f"{source}:{line_number}: invalid JSON: {exc}") from exc
-        prompt_id = str(item.get("id", f"line-{line_number}"))
-        text = item.get("prompt")
+        if not isinstance(item, dict):
+            raise ValueError(f"{source}:{line_number}: each line must be a JSON object")
+        raw_id = item.get("id")
+        prompt_id = f"line-{line_number}" if raw_id is None else str(raw_id)
+        if not prompt_id.strip():
+            raise ValueError(f"{source}:{line_number}: 'id' cannot be empty")
+        input_field = "prompt"
+        text = item.get(input_field)
         if not isinstance(text, str) or not text.strip():
-            raise ValueError(f"{source}:{line_number}: 'prompt' must be a non-empty string")
+            input_field = "question"
+            text = item.get(input_field)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(
+                f"{source}:{line_number}: 'question' or 'prompt' must be a non-empty string"
+            )
         if prompt_id in seen:
             raise ValueError(f"{source}:{line_number}: duplicate id {prompt_id!r}")
         seen.add(prompt_id)
-        prompts.append(Prompt(prompt_id, text))
+        prompts.append(Prompt(prompt_id, text, input_field, item))
     if not prompts:
         raise ValueError(f"{source} contains no prompts")
     return prompts
@@ -133,10 +171,20 @@ def _one_request(
     )
 
 
-def run_benchmark(config: ExperimentConfig, *, base_url: str | None = None) -> dict[str, Any]:
+def run_benchmark(
+    config: ExperimentConfig,
+    *,
+    base_url: str | None = None,
+    prompt_path: str | Path | None = None,
+) -> dict[str, Any]:
     base_url = (base_url or config.base_url).rstrip("/")
-    prompt_path = config.prompt_path()
-    prompts = load_prompts(prompt_path)
+    source = (
+        Path(prompt_path).expanduser().resolve()
+        if prompt_path is not None
+        else config.prompt_path()
+    )
+    prompts = load_prompts(source)
+    prompts_by_id = {prompt.prompt_id: prompt for prompt in prompts}
     bench = config.benchmark
 
     warmup_errors: list[str] = []
@@ -176,6 +224,9 @@ def run_benchmark(config: ExperimentConfig, *, base_url: str | None = None) -> d
                         {
                             "prompt_id": prompt.prompt_id,
                             "repetition": repetition,
+                            "input_field": prompt.input_field,
+                            "input": prompt.text,
+                            "source_record": prompt.source_record,
                             "error": f"{type(exc).__name__}: {exc}",
                         }
                     )
@@ -198,14 +249,27 @@ def run_benchmark(config: ExperimentConfig, *, base_url: str | None = None) -> d
         "ttft": _timing([item.ttft_s for item in results]),
         "tpot": _timing(tpots),
     }
+    request_records: list[dict[str, Any]] = []
+    for item in results:
+        prompt = prompts_by_id[item.prompt_id]
+        record = item.as_dict()
+        record.update(
+            {
+                "input_field": prompt.input_field,
+                "input": prompt.text,
+                "source_record": prompt.source_record,
+            }
+        )
+        request_records.append(record)
+
     return {
         "schema_version": 1,
         "created_at": datetime.now(UTC).isoformat(),
         "experiment": config_as_dict(config),
         "server_command": render_shell_command(config),
         "workload": {
-            "prompt_file": str(prompt_path),
-            "prompt_file_sha256": hashlib.sha256(prompt_path.read_bytes()).hexdigest(),
+            "prompt_file": str(source),
+            "prompt_file_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
             "unique_prompts": len(prompts),
         },
         "base_url": base_url,
@@ -215,7 +279,7 @@ def run_benchmark(config: ExperimentConfig, *, base_url: str | None = None) -> d
         "gpu": monitor.summary(),
         "warmup_errors": warmup_errors,
         "errors": errors,
-        "requests": [item.as_dict() for item in results],
+        "requests": request_records,
     }
 
 
@@ -224,5 +288,48 @@ def write_result(result: dict[str, Any], path: str | Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(destination)
+    return destination
+
+
+def write_responses_jsonl(result: dict[str, Any], path: str | Path) -> Path:
+    """Write a compact, line-oriented response file including failed requests."""
+    records: list[dict[str, Any]] = []
+    for item in result.get("requests", []):
+        record = {
+            "status": "ok",
+            "prompt_id": item["prompt_id"],
+            "repetition": item["repetition"],
+            "input_field": item["input_field"],
+            "input": item["input"],
+            "source_record": item["source_record"],
+            "response": item["text"],
+            "output_tokens": item["output_tokens"],
+            "latency_s": item["latency_s"],
+            "ttft_s": item["ttft_s"],
+            "tpot_s": item["tpot_s"],
+            "finish_reason": item["finish_reason"],
+        }
+        record[str(item["input_field"])] = item["input"]
+        records.append(record)
+    for item in result.get("errors", []):
+        record = {
+            "status": "error",
+            "prompt_id": item["prompt_id"],
+            "repetition": item["repetition"],
+            "input_field": item["input_field"],
+            "input": item["input"],
+            "source_record": item["source_record"],
+            "error": item["error"],
+        }
+        record[str(item["input_field"])] = item["input"]
+        records.append(record)
+    records.sort(key=lambda item: (int(item["repetition"]), str(item["prompt_id"])))
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    payload = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in records)
+    temporary.write_text(payload, encoding="utf-8")
     temporary.replace(destination)
     return destination
