@@ -1,0 +1,4 @@
+{"id":"zh-summary","prompt":"请用三句话解释什么是推测解码，以及草稿模型为什么能加速大语言模型推理。"}
+{"id":"math","prompt":"若 x + 2y = 11 且 3x - y = 5，求 x 和 y，并写出验算过程。"}
+{"id":"code","prompt":"Write a Python function that returns the longest common prefix of a list of strings. Include type hints and two examples."}
+{"id":"reasoning","prompt":"A farmer has chickens and rabbits. There are 35 heads and 94 legs. How many of each animal are there? Explain briefly."}

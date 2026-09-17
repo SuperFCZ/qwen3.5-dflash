@@ -1,0 +1,23 @@
+services:
+  bench:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.vllm
+    ipc: host
+    shm_size: "16gb"
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: ["bash"]
+    stdin_open: true
+    tty: true

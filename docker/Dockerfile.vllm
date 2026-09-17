@@ -1,0 +1,13 @@
+ARG VLLM_IMAGE=vllm/vllm-openai:v0.22.1
+FROM ${VLLM_IMAGE}
+
+WORKDIR /workspace
+COPY plugins/dflash_vllm_patch /tmp/dflash_vllm_patch
+COPY pyproject.toml README.md /tmp/dflash_bench/
+COPY src /tmp/dflash_bench/src
+
+RUN python3 -m pip install --no-cache-dir --no-deps /tmp/dflash_vllm_patch \
+    && python3 -m pip install --no-cache-dir --no-deps /tmp/dflash_bench
+
+ENTRYPOINT []
+CMD ["bash"]

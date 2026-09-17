@@ -1,0 +1,6 @@
+This plugin contains an adapted implementation of the quantized-DFlash and
+conditional-SWA vLLM compatibility work published by Nota AI in
+https://github.com/nota-github/adaptfm-quant-dflash (Apache License 2.0).
+
+The local implementation also covers the quantized ``fc`` path described by
+the naveenrajk/Qwen3.5-4B-DFlash-W8A16 model card.

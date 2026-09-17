@@ -1,0 +1,4 @@
+# Keep this stack isolated from other projects. Python 3.12 is required.
+vllm==0.22.1
+transformers>=5.5.1,<5.6
+compressed-tensors==0.15.0.1

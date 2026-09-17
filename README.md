@@ -1,0 +1,233 @@
+# Qwen3.5-4B DFlash 量化基准
+
+这个仓库用于在单张 NVIDIA RTX 3090（24 GB）上，复现并比较 Qwen3.5-4B
+DFlash 草稿模型的量化效果：
+
+- [`naveenrajk/Qwen3.5-4B-DFlash-W8A16`](https://huggingface.co/naveenrajk/Qwen3.5-4B-DFlash-W8A16)
+- [`nota-ai/Qwen3.5-4B-DFlash-GPTQ-W4A16`](https://huggingface.co/nota-ai/Qwen3.5-4B-DFlash-GPTQ-W4A16)
+
+它不是新的推理引擎，而是围绕 **vLLM 0.22.1** 的可复现实验层：负责启动服务、应用量化
+DFlash 兼容补丁、发送成对请求、读取 Prometheus 接受率计数器、采集 `nvidia-smi`
+遥测，并生成可直接比较的 JSON/Markdown 结果。
+
+## 为什么单独建仓库
+
+这是比直接修改 `day8reak/qwen3.5-4B-dflash` 更合适的边界。后者主要是严格 BF16、六层草稿
+模型的正确性参考实现；这里的两个量化 checkpoint 是五层 `compressed-tensors` 草稿，且 Nota
+W4 还绑定了单独训练的 QAD W4 目标模型和可选 SWA。把它们塞进参考仓库会混合模型实现、运行时
+补丁和实验方法，也容易做出不公平的 W4/W8 横向比较。
+
+本仓库因此拆成两个实验轨道：
+
+| 轨道 | 固定目标模型 | 对照 | 待测草稿 | 能回答的问题 |
+|---|---|---|---|---|
+| W8 | `Qwen/Qwen3.5-4B` BF16 | 同源五层 BF16 草稿的固定历史 revision | W8A16 草稿 | 仅把草稿权重变成 INT8 后，接受率、速度和显存如何变化？ |
+| W4 | `nota-ai/Qwen3.5-4B-QAD-W4A16` | 同一目标、不使用草稿 | W4A16 草稿，full attention / SWA-1024 | Nota 的完整 W4 推测解码系统相对目标单跑是否获益？ |
+
+> W4 和 W8 **不是一条纯量化阶梯**。它们的目标模型、草稿训练过程和运行策略不同，不能把两者
+> 的差值直接归因于 4-bit 与 8-bit。
+
+## 仓库内容
+
+```text
+configs/                    六个可复现实验配置
+plugins/dflash_vllm_patch/  vLLM 0.22.1 量化 DFlash + 可选 SWA 插件
+prompts/                    smoke 与 20 条成对基准提示
+src/dflash_bench/           服务管理、请求、指标、GPU 遥测与报告工具
+scripts/run_3090_matrix.py  K×并发实验矩阵
+docs/                       方法与排错说明
+tests/                      不依赖 GPU 的单元测试
+```
+
+## 环境要求
+
+- Linux x86_64；RTX 3090 24 GB；可被当前 vLLM/CUDA 镜像支持的 NVIDIA 驱动
+- Python 3.12（Nota 的已验证环境为 `>=3.12,<3.13`）
+- 充足磁盘空间和 Hugging Face 访问权限
+- 建议不要在现有训练环境中原地安装；为本仓库创建独立虚拟环境
+
+先确认 GPU：
+
+```bash
+nvidia-smi
+```
+
+### 方式一：独立虚拟环境
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-vllm.txt
+python -m pip install -e plugins/dflash_vllm_patch
+python -m pip install -e '.[dev]'
+```
+
+这里固定 `vllm==0.22.1`，因为两个模型的已知可运行方案和本仓库补丁都针对这个版本。不要在同一
+轮比较中途升级 vLLM、Transformers 或 CUDA 栈。
+
+### 方式二：Docker
+
+```bash
+docker compose build bench
+docker compose run --rm bench
+```
+
+容器内已经安装基准工具和插件，当前仓库与 Hugging Face cache 会被挂载到 `/workspace`。如模型
+需要认证，先在宿主机设置 `HF_TOKEN`。Docker 使用官方 `vllm/vllm-openai:v0.22.1` 作为默认
+基础镜像，可用 `--build-arg VLLM_IMAGE=...` 替换为适配本机驱动的等价镜像。
+
+## 先做 smoke test
+
+验证配置并查看实际启动命令：
+
+```bash
+dflash-bench validate configs/*.toml
+dflash-bench command configs/w8_draft.toml
+```
+
+先分别跑一条 W8 和 W4 小实验：
+
+```bash
+dflash-bench run configs/w8_draft.toml \
+  --prompts prompts/smoke.jsonl --max-tokens 64 --output results/w8-smoke.json
+
+dflash-bench run configs/w4_draft_full.toml \
+  --prompts prompts/smoke.jsonl --max-tokens 64 --output results/w4-smoke.json
+```
+
+`run` 会启动 vLLM，等待 `/health`，预热，读取一次 `/metrics`，执行测量请求，再读取计数器差值并
+停止服务。服务日志与结果同名，后缀为 `.server.log`。模型首次下载不计入基准时间。
+
+如果你已经手工启动了服务：
+
+```bash
+dflash-bench run configs/w8_draft.toml \
+  --no-launch --base-url http://127.0.0.1:8000 \
+  --output results/w8-existing-server.json
+```
+
+此时配置仍决定请求模型名和基准参数，但工具不会管理服务进程。
+
+## 推荐实验顺序
+
+### W8：干净的草稿量化对照
+
+```bash
+dflash-bench run configs/w8_target_only.toml --output results/w8-target.json
+dflash-bench run configs/w8_bf16_draft.toml --output results/w8-bf16-k15.json
+dflash-bench run configs/w8_draft.toml --output results/w8-int8-k15.json
+
+dflash-bench compare \
+  results/w8-target.json results/w8-bf16-k15.json results/w8-int8-k15.json \
+  --output results/w8-report.md
+```
+
+BF16 配置固定到上游 revision
+`96899cc270945f554998309580b08a04a05a3187`。当前上游主分支已换成六层结构；如果不固定
+revision，就不再是 W8 checkpoint 的同源五层基线。
+
+### W4：完整系统对照
+
+```bash
+dflash-bench run configs/w4_target_only.toml --output results/w4-target.json
+dflash-bench run configs/w4_draft_full.toml --output results/w4-full-k15.json
+dflash-bench run configs/w4_draft_swa1024.toml --output results/w4-swa-k15.json
+
+dflash-bench compare \
+  results/w4-target.json results/w4-full-k15.json results/w4-swa-k15.json \
+  --output results/w4-report.md
+```
+
+SWA-1024 在上下文不超过 1024 时会保持 full-attention 路径；长上下文时才切到对称滑动窗口。
+
+### K 与并发扫描
+
+任何草稿配置都可在命令行覆盖 `K`、并发和重复次数：
+
+```bash
+dflash-bench run configs/w8_draft.toml --k 3  --concurrency 1 --repetitions 3
+dflash-bench run configs/w8_draft.toml --k 7  --concurrency 1 --repetitions 3
+dflash-bench run configs/w8_draft.toml --k 15 --concurrency 4 --repetitions 3
+```
+
+也可以运行完整矩阵（会多次加载模型，可能耗时数小时）：
+
+```bash
+python scripts/run_3090_matrix.py --track all --repetitions 3
+```
+
+先用 `--dry-run` 查看全部命令；用 `--quick` 只跑 smoke prompts、`K=15`、并发 1。
+
+## 结果指标
+
+每个 JSON 保存完整配置、硬件信息、逐请求输出和以下聚合指标：
+
+- `mean_accepted_draft_tokens = accepted_draft_tokens / draft_steps`；
+- `mean_acceptance_length = 1 + mean_accepted_draft_tokens`，包含目标模型 bonus token；
+- `acceptance_rate = accepted_draft_tokens / drafted_tokens`；
+- 每个草稿位置的无条件接受率；
+- 请求吞吐、输出 token 吞吐、端到端延迟、TTFT、TPOT；
+- 测量区间的峰值显存、平均 GPU 利用率、峰值功耗和温度；
+- 相对报告中第一份结果的 greedy 完整文本一致率。
+
+结果还记录实际 vLLM 命令、prompt 文件绝对路径及 SHA-256；修改 prompt 文件后不会被误认为同一
+工作负载。
+
+Prometheus 计数器在预热后读取，并用前后差值计算，因此不会把预热请求混入接受率。显存指标是
+服务已启动后的运行期峰值，不代表模型加载过程的瞬时峰值。
+
+两种“平均接受长度”口径经常混用。vLLM 日志使用包含 bonus token 的后一种；W8 模型卡中约
+`3.60` 的数字与 `K × acceptance_rate` 一致，实际上是不含 bonus 的
+`mean_accepted_draft_tokens`。本仓库同时输出两列，避免相差 1 的伪回归。
+
+## 如何判断量化是否“有效”
+
+至少同时看四件事：
+
+1. **正确性**：同目标、greedy、同 prompts 时，目标单跑与推测解码应保持完整输出一致。
+2. **草稿质量**：对照平均接受长度、接受率和逐位置曲线，而不只看单个平均数。
+3. **链路性能**：看 output tok/s 与 TPOT；草稿自身更快不等于端到端一定更快，验证目标常是瓶颈。
+4. **资源收益**：比较运行期显存。W8 模型卡的公开 3090 数据显示约节省 480 MiB，但端到端吞吐
+   变化很小；应以你的驱动、上下文和并发下的实测为准。
+
+建议每个点至少重复三次，保持 prompt 顺序、目标、vLLM 版本、最大长度、并发、温度和 GPU 功耗
+状态一致。详细协议见 [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md)。
+
+## 量化兼容补丁
+
+vLLM 0.22.1 的 DFlash 实现存在直接读取线性层浮点 `.weight` 的路径，量化层可能因此加载失败，
+或绕过量化感知 forward。`plugins/dflash_vllm_patch` 通过 vLLM general-plugin entry point 在 API
+进程和 worker 中统一修补：
+
+1. 确保草稿 decoder layer 收到 draft quantization config；
+2. 量化权重完成 post-processing 后，通过量化层的 identity probe 构造 fused K/V 权重；
+3. 常规 QKV 路径调用量化线性层自身的 forward；
+4. `fc` 路径根据量化 scale 的 dtype 转换输入；
+5. 可选启用 Nota 的条件式、对称 SWA。
+
+补丁默认不生效。量化配置通过 `EQC_DFLASH_QUANT_PATCH=1` 开启；SWA 配置再设置
+`EQC_DFLASH_SWA_WINDOW=1024`。实现改编自 Nota AI 的 Apache-2.0 插件，并保留了 NOTICE。
+
+## 测试
+
+控制面测试不需要 GPU 或 vLLM：
+
+```bash
+python -m unittest discover -s tests -v
+python -m compileall -q src plugins/dflash_vllm_patch
+```
+
+GPU smoke test 仍是发布实验结果前的必要步骤。常见问题见
+[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)。
+
+## 上游资料
+
+- [DFlash 参考实现](https://github.com/day8reak/qwen3.5-4B-dflash)
+- [Nota AdaptFM 量化 DFlash](https://github.com/nota-github/adaptfm-quant-dflash)
+- [vLLM DFlash 量化草稿问题 #51581](https://github.com/vllm-project/vllm/issues/51581)
+- [DFlash 论文](https://arxiv.org/abs/2602.06036)
+
+## License
+
+Apache License 2.0。模型权重不包含在本仓库中，分别遵循其模型卡标注的许可证和使用条款。

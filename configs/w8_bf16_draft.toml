@@ -1,0 +1,28 @@
+name = "w8-bf16-draft"
+description = "Matching five-layer BF16 upstream draft; clean baseline for the W8 checkpoint."
+
+[server]
+model = "Qwen/Qwen3.5-4B"
+served_model_name = "qwen3.5-4b"
+dtype = "bfloat16"
+max_model_len = 8192
+max_num_seqs = 4
+max_num_batched_tokens = 16384
+gpu_memory_utilization = 0.90
+attention_backend = "FLASH_ATTN"
+trust_remote_code = true
+
+[speculative]
+method = "dflash"
+model = "z-lab/Qwen3.5-4B-DFlash"
+revision = "96899cc270945f554998309580b08a04a05a3187"
+num_speculative_tokens = 15
+
+[benchmark]
+prompt_file = "../prompts/benchmark.jsonl"
+repetitions = 1
+warmup_requests = 2
+max_tokens = 128
+concurrency = 1
+temperature = 0.0
+seed = 0

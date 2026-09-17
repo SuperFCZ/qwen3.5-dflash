@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dflash-vllm-patch"
+version = "0.1.0"
+description = "vLLM 0.22.1 compatibility patch for quantized Qwen3 DFlash drafters"
+requires-python = ">=3.12,<3.13"
+license = { text = "Apache-2.0" }
+dependencies = []
+
+[project.entry-points."vllm.general_plugins"]
+dflash_quantized_draft = "dflash_vllm_patch:register"
+
+[tool.setuptools]
+packages = ["dflash_vllm_patch"]

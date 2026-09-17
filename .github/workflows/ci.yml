@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install control-plane packages
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+          python -m pip install --no-deps -e plugins/dflash_vllm_patch
+      - name: Lint
+        run: ruff check src tests scripts plugins/dflash_vllm_patch
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Compile and validate configs
+        run: |
+          python -m compileall -q src plugins/dflash_vllm_patch
+          dflash-bench validate configs/*.toml

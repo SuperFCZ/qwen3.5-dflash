@@ -1,0 +1,31 @@
+name = "w8-draft"
+description = "W8A16 compressed-tensors draft on the same BF16 target as its upstream baseline."
+
+[server]
+model = "Qwen/Qwen3.5-4B"
+served_model_name = "qwen3.5-4b"
+dtype = "bfloat16"
+max_model_len = 8192
+max_num_seqs = 4
+max_num_batched_tokens = 16384
+gpu_memory_utilization = 0.90
+attention_backend = "FLASH_ATTN"
+trust_remote_code = true
+
+[server.environment]
+EQC_DFLASH_QUANT_PATCH = "1"
+
+[speculative]
+method = "dflash"
+model = "naveenrajk/Qwen3.5-4B-DFlash-W8A16"
+num_speculative_tokens = 15
+quantization = "compressed-tensors"
+
+[benchmark]
+prompt_file = "../prompts/benchmark.jsonl"
+repetitions = 1
+warmup_requests = 2
+max_tokens = 128
+concurrency = 1
+temperature = 0.0
+seed = 0

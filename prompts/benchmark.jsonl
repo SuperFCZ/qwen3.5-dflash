@@ -1,0 +1,20 @@
+{"id":"zh-explain-01","prompt":"请向刚接触深度学习的工程师解释权重量化、激活量化和 KV cache 量化的区别，并指出各自最常见的精度风险。"}
+{"id":"zh-summary-02","prompt":"将下面观点压缩成不超过五句话的摘要：推测解码的最终输出由目标模型验证，因此在采样实现正确时，草稿模型主要影响速度而不是输出分布；但量化实现错误仍可能造成静默的接受率异常。"}
+{"id":"zh-plan-03","prompt":"为单张 24GB 显卡上的大模型推理实验写一个简洁的检查清单，覆盖环境、显存、吞吐、延迟、正确性和复现信息。"}
+{"id":"zh-compare-04","prompt":"比较平均接受长度和逐 token 接受率这两个推测解码指标。什么情况下只看其中一个会得出误导性结论？"}
+{"id":"zh-writing-05","prompt":"写一段约 150 字的中文说明，解释为什么基准测试必须先预热，并且要从预热之后再读取累计计数器。"}
+{"id":"math-linear-06","prompt":"Solve the system 4x - 3y = 11 and 2x + 5y = -1. Show each algebraic step and verify the result."}
+{"id":"math-prob-07","prompt":"A fair six-sided die is rolled four times. What is the probability of seeing exactly two sixes? Give the exact fraction and decimal approximation."}
+{"id":"math-seq-08","prompt":"The first term of an arithmetic sequence is 7 and the 20th term is 83. Find the common difference and the sum of the first 20 terms."}
+{"id":"logic-09","prompt":"All red widgets are heavy. No heavy widget is fragile. Some objects in the box are red widgets. What conclusions necessarily follow? Separate necessary conclusions from unsupported ones."}
+{"id":"reasoning-10","prompt":"Three switches outside a closed room control three bulbs inside. You may enter the room only once. Describe how to determine which switch controls each bulb."}
+{"id":"code-python-11","prompt":"Implement an iterative Python binary search returning the first index of a target in a sorted list with duplicates. Explain the invariant and complexity."}
+{"id":"code-debug-12","prompt":"Find and fix the bug in this Python function, then explain it: def average(xs): return sum(xs) / len(xs) if xs else None. The intended contract is to reject an empty list with ValueError and otherwise return a float."}
+{"id":"code-sql-13","prompt":"Given tables users(id, name) and orders(id, user_id, total, created_at), write SQL to return the top three users by total spend in 2025, including users with ties at third place."}
+{"id":"code-design-14","prompt":"Design a small REST API for submitting asynchronous jobs and polling their status. Give endpoints, key request and response fields, and idempotency behavior."}
+{"id":"english-explain-15","prompt":"Explain speculative decoding to a backend engineer without using equations. Include one analogy, one limitation, and one metric to monitor."}
+{"id":"english-edit-16","prompt":"Rewrite for clarity and precision: 'The quantized model is basically the same and it seems faster, so the experiment proves quantization has no downside.'"}
+{"id":"science-17","prompt":"Why does the sky appear blue during the day and reddish near sunset? Explain using scattering while avoiding unnecessary jargon."}
+{"id":"systems-18","prompt":"A service has low average latency but a high p95 latency. List five plausible causes and a measurement that would help confirm each one."}
+{"id":"data-19","prompt":"You have two benchmark runs with different prompt lengths and concurrency. Explain why comparing raw requests per second is invalid and propose a fair comparison protocol."}
+{"id":"creative-20","prompt":"Write a short dialogue between a performance engineer and a researcher who disagree about whether a 2% speedup is meaningful. End with a concrete experiment they both accept."}
