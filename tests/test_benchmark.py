@@ -103,6 +103,57 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(records[0]["question"], "How many?")
         self.assertEqual(records[0]["response"], "2")
 
+    def test_response_jsonl_naturally_groups_repetitions_by_prompt(self) -> None:
+        def response(prompt_id: str, repetition: int) -> dict:
+            return {
+                "prompt_id": prompt_id,
+                "repetition": repetition,
+                "input_field": "question",
+                "input": prompt_id,
+                "source_record": {"question": prompt_id},
+                "text": "answer",
+                "output_tokens": 1,
+                "latency_s": 0.2,
+                "ttft_s": 0.1,
+                "tpot_s": None,
+                "finish_reason": "stop",
+            }
+
+        result = {
+            "requests": [
+                response("prompt10", 0),
+                response("prompt2", 1),
+                response("prompt1", 1),
+                response("prompt2", 0),
+                response("prompt1", 0),
+            ],
+            "errors": [
+                {
+                    "prompt_id": "prompt10",
+                    "repetition": 1,
+                    "input_field": "question",
+                    "input": "prompt10",
+                    "source_record": {"question": "prompt10"},
+                    "error": "timeout",
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_responses_jsonl(result, Path(directory) / "responses.jsonl")
+            records = [json.loads(line) for line in path.read_text().splitlines()]
+
+        self.assertEqual(
+            [(item["prompt_id"], item["repetition"]) for item in records],
+            [
+                ("prompt1", 0),
+                ("prompt1", 1),
+                ("prompt2", 0),
+                ("prompt2", 1),
+                ("prompt10", 0),
+                ("prompt10", 1),
+            ],
+        )
+
     def test_percentile_interpolates(self) -> None:
         self.assertEqual(_percentile([1.0, 2.0, 3.0], 0.5), 2.0)
         self.assertAlmostEqual(_percentile([0.0, 10.0], 0.95) or 0, 9.5)

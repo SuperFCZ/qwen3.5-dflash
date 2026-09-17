@@ -174,6 +174,11 @@ results/w8-gsm8k/
 输入、模型输出、耗时、token 数以及失败记录。`manifest.json` 汇总所有分片并给出对应文件名。
 目录模式下 `--output` 表示目录，而单文件模式下仍表示结果 JSON 路径。
 
+逐题记录按 `prompt_id` 自然排序，再按 `repetition` 升序排列。例如顺序为
+`prompt1/r0, prompt1/r1, prompt2/r0, prompt2/r1, prompt10/r0, ...`，不会出现字符串排序导致的
+`1, 10, 100, 2`。各次 repetition 保留为独立记录，便于检查输出一致性和运行波动，不会被平均值
+掩盖。
+
 如果要严格判断“草稿量化”本身的影响，不要直接把 W4 与 W8 相减：应在各自轨道内使用相同数据
 分别跑本 README 开头表格中的 target/baseline/draft 配置，再比较对应分片的结果。
 

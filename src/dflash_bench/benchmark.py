@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import platform
+import re
 import statistics
 import subprocess
 import time
@@ -28,6 +29,17 @@ class Prompt:
     text: str
     input_field: str = "prompt"
     source_record: dict[str, Any] = field(default_factory=dict)
+
+
+def _prompt_id_sort_key(value: object) -> tuple[tuple[tuple[int, int | str], ...], str, str]:
+    """Sort embedded numbers numerically while keeping arbitrary IDs deterministic."""
+    text = str(value)
+    chunks: list[tuple[int, int | str]] = []
+    for chunk in re.split(r"(\d+)", text):
+        if not chunk:
+            continue
+        chunks.append((0, int(chunk)) if chunk.isdigit() else (1, chunk.casefold()))
+    return tuple(chunks), text.casefold(), text
 
 
 def discover_prompt_files(path: str | Path) -> list[Path]:
@@ -234,7 +246,9 @@ def run_benchmark(
     after = parse_prometheus(fetch_metrics(base_url))
     spec = speculative_stats(before, after)
 
-    results.sort(key=lambda item: (item.repetition, item.prompt_id))
+    # Keep every prompt's repeated measurements adjacent in serialized results.
+    results.sort(key=lambda item: (_prompt_id_sort_key(item.prompt_id), item.repetition))
+    errors.sort(key=lambda item: (_prompt_id_sort_key(item["prompt_id"]), int(item["repetition"])))
     total_tokens = sum(item.output_tokens for item in results)
     tpots = [item.tpot_s for item in results if item.tpot_s is not None]
     aggregate = {
@@ -324,7 +338,13 @@ def write_responses_jsonl(result: dict[str, Any], path: str | Path) -> Path:
         }
         record[str(item["input_field"])] = item["input"]
         records.append(record)
-    records.sort(key=lambda item: (int(item["repetition"]), str(item["prompt_id"])))
+    records.sort(
+        key=lambda item: (
+            _prompt_id_sort_key(item["prompt_id"]),
+            int(item["repetition"]),
+            str(item["status"]),
+        )
+    )
 
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
