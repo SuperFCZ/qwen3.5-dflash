@@ -64,3 +64,11 @@ target-only baseline.
 Model downloads, kernel compilation, CUDA graph capture, and cache population happen on the
 first launch. The harness excludes request warm-up from metrics, but cannot make the first
 server start representative. Complete one smoke run before collecting repeated measurements.
+
+## No `CUDA_EVENT_PROFILE` line appears
+
+Confirm that the rendered command contains `EQC_DFLASH_CUDA_PROFILE=1`, let the harness stop
+the managed server normally, and inspect the worker's complete server log. The report is
+emitted only during graceful worker shutdown and only after at least one qualifying phase was
+recorded. Target-only prefill and multi-token batches do not count as single-token decode;
+mixed DFlash verify/prefill batches are deliberately excluded as well.

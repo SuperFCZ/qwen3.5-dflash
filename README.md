@@ -282,6 +282,40 @@ vLLM 0.22.1 的 DFlash 实现存在直接读取线性层浮点 `.weight` 的路�
 补丁默认不生效。量化配置通过 `EQC_DFLASH_QUANT_PATCH=1` 开启；SWA 配置再设置
 `EQC_DFLASH_SWA_WINDOW=1024`。实现改编自 Nota AI 的 Apache-2.0 插件，并保留了 NOTICE。
 
+### CUDA Event 分阶段计时
+
+需要区分草稿开销与目标验证开销时，在待测 TOML 中开启：
+
+```toml
+[server.environment]
+EQC_DFLASH_CUDA_PROFILE = "1"
+```
+
+量化草稿配置已有 `[server.environment]`，直接在同一节追加这一行；target-only 配置则新建该节。
+也可以只对单次命令临时开启，例如
+`EQC_DFLASH_CUDA_PROFILE=1 dflash-bench run configs/w8_draft.toml --output results/profile.json`。
+插件只记录 CUDA Event，不在每个 decode step 同步。vLLM worker shutdown 时统一同步一次，并在
+`*.server.log`（目录输入模式为 `server.log`）输出一行机器可读 JSON：
+
+```text
+[dflash_vllm_patch] CUDA_EVENT_PROFILE {"clock":"cuda_event",...,"metrics":{"dflash_proposal":{"count":...,"mean_ms":...,"p50_ms":...,"p95_ms":...},"target_verify":{...},"target_only_single_token_decode":{...}}}
+```
+
+```bash
+rg 'CUDA_EVENT_PROFILE' results/*.server.log results/*/server.log
+```
+
+三个区间的口径如下：
+
+- `dflash_proposal`：完整 `DFlashProposer.propose`，包括 context-K/V 预计算、草稿 forward 和草稿采样；
+- `target_verify`：纯 DFlash verify batch，从目标模型 forward 开始，到 rejection sampling 结束；
+- `target_only_single_token_decode`：无 speculative config 的纯单-token decode batch，边界同上。
+
+prefill、混合 prefill/decode batch，以及只有部分请求携带 draft token 的混合 batch 不计入这三项。
+CUDA Event profiler 位于 vLLM worker，因而也会看到 harness 的 warm-up 请求；做严格的 measured-only
+采样时，可将 `warmup_requests=0`，并在正式实验前另跑一次 smoke warm-up。profiling 本身会增加少量
+Event 记录开销，因此端到端吞吐结论仍应以关闭该开关的正式运行结果为准。
+
 ## 测试
 
 控制面测试不需要 GPU 或 vLLM：

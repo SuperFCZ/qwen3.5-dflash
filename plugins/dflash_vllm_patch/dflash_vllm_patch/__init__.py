@@ -1,8 +1,7 @@
-"""Compatibility patches for quantized DFlash drafters on vLLM 0.22.1.
+"""Compatibility and profiling patches for DFlash on vLLM 0.22.1.
 
 The plugin is loaded in every vLLM process through the ``vllm.general_plugins``
-entry-point. It remains a no-op unless ``EQC_DFLASH_QUANT_PATCH=1`` or
-``EQC_DFLASH_SWA_WINDOW`` is set.
+entry-point. It remains a no-op unless a documented ``EQC_DFLASH_*`` switch is set.
 """
 
 from __future__ import annotations
@@ -15,6 +14,7 @@ from typing import Any
 QUANT_ENV = "EQC_DFLASH_QUANT_PATCH"
 SWA_ENV = "EQC_DFLASH_SWA_WINDOW"
 SWA_STATIC_ENV = "EQC_DFLASH_SWA_STATIC"
+CUDA_PROFILE_ENV = "EQC_DFLASH_CUDA_PROFILE"
 
 
 def _log(message: str) -> None:
@@ -209,6 +209,7 @@ def _patch_sliding_window(module: Any, window: int, *, static: bool) -> None:
 
 def register() -> None:
     quantized = os.environ.get(QUANT_ENV) == "1"
+    cuda_profile = os.environ.get(CUDA_PROFILE_ENV) == "1"
     raw_window = os.environ.get(SWA_ENV)
     window: int | None = None
     if raw_window:
@@ -216,7 +217,7 @@ def register() -> None:
             window = int(raw_window)
         except ValueError:
             _log(f"ignoring invalid {SWA_ENV}={raw_window!r}")
-    if not quantized and not (window and window > 0):
+    if not quantized and not cuda_profile and not (window and window > 0):
         return
     try:
         detected_version = version("vllm")
@@ -224,21 +225,30 @@ def register() -> None:
         detected_version = "unknown"
     if detected_version != "0.22.1":
         _log(f"warning: patches are validated on vLLM 0.22.1, found {detected_version}")
-    try:
-        import vllm.model_executor.models.qwen3_dflash as module
-    except Exception as exc:  # pragma: no cover - only exercised in the GPU env
-        _log(f"could not import vLLM DFlash module: {type(exc).__name__}: {exc}")
-        return
-    if quantized:
-        _patch_decoder_quant_config(module)
-        _patch_fused_kv(module)
-        _patch_attention_forward(module)
-        _patch_combine_hidden_states(module)
-        _log("quantized DFlash compatibility patches active")
-    if window and window > 0:
-        static = os.environ.get(SWA_STATIC_ENV) == "1"
-        _patch_sliding_window(module, window, static=static)
-        _log(f"DFlash SWA active: window={window}, static={static}")
+    if quantized or (window and window > 0):
+        try:
+            import vllm.model_executor.models.qwen3_dflash as module
+        except Exception as exc:  # pragma: no cover - only exercised in the GPU env
+            _log(f"could not import vLLM DFlash module: {type(exc).__name__}: {exc}")
+            return
+        if quantized:
+            _patch_decoder_quant_config(module)
+            _patch_fused_kv(module)
+            _patch_attention_forward(module)
+            _patch_combine_hidden_states(module)
+            _log("quantized DFlash compatibility patches active")
+        if window and window > 0:
+            static = os.environ.get(SWA_STATIC_ENV) == "1"
+            _patch_sliding_window(module, window, static=static)
+            _log(f"DFlash SWA active: window={window}, static={static}")
+    if cuda_profile:
+        try:
+            from .cuda_profile import install_cuda_event_profiling
+
+            install_cuda_event_profiling(_log)
+            _log("CUDA Event profiling active")
+        except Exception as exc:  # pragma: no cover - only exercised in the GPU env
+            _log(f"could not install CUDA Event profiling: {type(exc).__name__}: {exc}")
 
 
 __all__ = ["register"]

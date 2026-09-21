@@ -78,6 +78,15 @@ Performance metrics have different meanings:
 - Request/s is useful only when output lengths are held comparable.
 - Peak VRAM is sampled after server readiness; it is runtime residency, not load peak.
 
+The opt-in CUDA Event profiler (`EQC_DFLASH_CUDA_PROFILE=1`) reports three GPU timeline
+intervals at worker shutdown. `dflash_proposal` wraps the full DFlash proposer.
+`target_verify` and `target_only_single_token_decode` start immediately before the target
+model forward and end after rejection/ordinary sampling, respectively. Events are resolved
+opportunistically only after completion and synchronized once for the final report; no
+per-step synchronization is introduced. Only pure verify or pure single-token decode batches
+are classified. The server-side profiler includes harness warm-up requests, unlike the
+Prometheus counter deltas and end-to-end benchmark aggregates.
+
 ## 5. Correctness gate
 
 For greedy decoding, speculative decoding is intended to preserve the target model's
