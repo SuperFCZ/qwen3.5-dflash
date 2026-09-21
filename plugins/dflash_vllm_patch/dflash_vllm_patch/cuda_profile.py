@@ -61,17 +61,38 @@ class CudaEventProfiler:
         self._reported = False
         self._disabled = False
         self._error_reported = False
+        self._disable_reason: str | None = None
+        self._propose_hook_calls = 0
+        self._target_phase_matches = 0
+        self._target_phase_matches_by_phase = {
+            TARGET_VERIFY: 0,
+            TARGET_ONLY_DECODE: 0,
+        }
+        self._begin_calls = 0
+        self._finish_calls = 0
 
     def _disable(self, operation: str, exc: Exception) -> None:
         self._disabled = True
+        self._disable_reason = f"{operation}: {type(exc).__name__}: {exc}"
         if not self._error_reported:
-            self._emit(
-                "CUDA Event profiling disabled after "
-                f"{operation} failed: {type(exc).__name__}: {exc}"
-            )
+            try:
+                self._emit(
+                    "CUDA Event profiling disabled after "
+                    f"{operation} failed: {type(exc).__name__}: {exc}"
+                )
+            except Exception:  # pragma: no cover - diagnostics must stay best-effort
+                pass
             self._error_reported = True
 
+    def note_propose_hook(self) -> None:
+        self._propose_hook_calls += 1
+
+    def note_target_phase(self, phase: str) -> None:
+        self._target_phase_matches += 1
+        self._target_phase_matches_by_phase[phase] += 1
+
     def begin(self) -> _EventPair | None:
+        self._begin_calls += 1
         if self._disabled or self._reported:
             return None
         try:
@@ -84,6 +105,7 @@ class CudaEventProfiler:
             return None
 
     def finish(self, phase: str, pair: _EventPair | None) -> None:
+        self._finish_calls += 1
         if pair is None or self._disabled or self._reported:
             return
         try:
@@ -119,36 +141,72 @@ class CudaEventProfiler:
             "p95_ms": round(_percentile(values, 0.95), 6),
         }
 
-    def report(self) -> dict[str, Any] | None:
-        if self._reported or self._disabled:
+    def _phase_counts(self, values: dict[str, Any]) -> dict[str, int]:
+        counts = {phase: len(values[phase]) for phase in _PHASES}
+        counts["total"] = sum(counts.values())
+        return counts
+
+    def report(
+        self,
+        *,
+        force: bool = False,
+        trigger: str = "manual",
+    ) -> dict[str, Any] | None:
+        if self._reported:
             return None
-        if not any(self._pending.values()) and not any(self._elapsed_ms.values()):
+        has_samples = any(self._pending.values()) or any(self._elapsed_ms.values())
+        if not force and not has_samples and not self._disabled:
             return None
         self._reported = True
+        pending_counts = self._phase_counts(self._pending)
+        elapsed_counts = self._phase_counts(self._elapsed_ms)
+        if not self._disabled and has_samples:
+            try:
+                self._torch.cuda.synchronize()
+                for phase in _PHASES:
+                    pending = self._pending[phase]
+                    while pending:
+                        pair = pending.popleft()
+                        self._elapsed_ms[phase].append(pair.start.elapsed_time(pair.end))
+            except Exception as exc:  # pragma: no cover - depends on CUDA runtime
+                self._disable("final report", exc)
+
         try:
-            self._torch.cuda.synchronize()
-            for phase in _PHASES:
-                pending = self._pending[phase]
-                while pending:
-                    pair = pending.popleft()
-                    self._elapsed_ms[phase].append(pair.start.elapsed_time(pair.end))
-            payload = {
-                "schema_version": 1,
-                "clock": "cuda_event",
-                "device": int(self._torch.cuda.current_device()),
-                "pid": os.getpid(),
-                "metrics": {
-                    phase: self._summary(self._elapsed_ms[phase]) for phase in _PHASES
-                },
-            }
+            device = int(self._torch.cuda.current_device())
+        except Exception:  # pragma: no cover - depends on CUDA shutdown order
+            device = None
+        payload = {
+            "schema_version": 2,
+            "clock": "cuda_event",
+            "device": device,
+            "pid": os.getpid(),
+            "trigger": trigger,
+            "diagnostics": {
+                "propose_hook_calls": self._propose_hook_calls,
+                "target_phase_matches": self._target_phase_matches,
+                "target_phase_matches_by_phase": dict(
+                    self._target_phase_matches_by_phase
+                ),
+                "begin_calls": self._begin_calls,
+                "finish_calls": self._finish_calls,
+                "pending_counts": pending_counts,
+                "elapsed_counts": elapsed_counts,
+                "final_elapsed_counts": self._phase_counts(self._elapsed_ms),
+                "disabled": self._disabled,
+                "disable_reason": self._disable_reason,
+            },
+            "metrics": {
+                phase: self._summary(self._elapsed_ms[phase]) for phase in _PHASES
+            },
+        }
+        try:
             self._emit(
                 "CUDA_EVENT_PROFILE "
                 + json.dumps(payload, sort_keys=True, separators=(",", ":"))
             )
-            return payload
-        except Exception as exc:  # pragma: no cover - depends on CUDA shutdown order
-            self._disable("final report", exc)
-            return None
+        except Exception:  # pragma: no cover - logging must not block shutdown
+            pass
+        return payload
 
 
 def _uses_dflash(runner: Any) -> bool:
@@ -228,6 +286,8 @@ def install_cuda_event_profiling(
     @functools.wraps(original_execute)
     def execute_model(self: Any, scheduler_output: Any, *args: Any, **kwargs: Any) -> Any:
         phase = _target_phase(self, scheduler_output)
+        if phase is not None:
+            profiler.note_target_phase(phase)
         if hasattr(self, pending_attribute):
             delattr(self, pending_attribute)
         setattr(self, phase_attribute, phase)
@@ -268,6 +328,7 @@ def install_cuda_event_profiling(
 
     @functools.wraps(original_propose)
     def propose(self: Any, *args: Any, **kwargs: Any) -> Any:
+        profiler.note_propose_hook()
         return _timed_call(
             profiler,
             DFLASH_PROPOSAL,
@@ -281,7 +342,7 @@ def install_cuda_event_profiling(
 
     @functools.wraps(original_shutdown)
     def shutdown(self: Any, *args: Any, **kwargs: Any) -> Any:
-        profiler.report()
+        profiler.report(force=True, trigger="gpu_model_runner_shutdown")
         return original_shutdown(self, *args, **kwargs)
 
     original_engine_core_shutdown = engine_core_class.shutdown
@@ -289,7 +350,7 @@ def install_cuda_event_profiling(
     @functools.wraps(original_engine_core_shutdown)
     def engine_core_shutdown(self: Any, *args: Any, **kwargs: Any) -> Any:
         # EngineCore.shutdown tears down model_executor first in vLLM 0.22.1.
-        profiler.report()
+        profiler.report(force=True, trigger="engine_core_shutdown")
         return original_engine_core_shutdown(self, *args, **kwargs)
 
     runner_class.execute_model = execute_model
@@ -299,7 +360,7 @@ def install_cuda_event_profiling(
     runner_class._eqc_cuda_event_profiler = profiler
     proposer_class.propose = propose
     engine_core_class.shutdown = engine_core_shutdown
-    atexit.register(profiler.report)
+    atexit.register(functools.partial(profiler.report, trigger="atexit"))
     return profiler
 
 

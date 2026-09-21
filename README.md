@@ -299,7 +299,7 @@ model executor 之前统一同步一次，并在
 `*.server.log`（目录输入模式为 `server.log`）输出一行机器可读 JSON：
 
 ```text
-[dflash_vllm_patch] CUDA_EVENT_PROFILE {"clock":"cuda_event",...,"metrics":{"dflash_proposal":{"count":...,"mean_ms":...,"p50_ms":...,"p95_ms":...},"target_verify":{...},"target_only_single_token_decode":{...}}}
+[dflash_vllm_patch] CUDA_EVENT_PROFILE {"clock":"cuda_event","diagnostics":{"propose_hook_calls":...,"target_phase_matches":...,"begin_calls":...,"finish_calls":...,"pending_counts":{...},"elapsed_counts":{...},"disabled":false},"metrics":{"dflash_proposal":{"count":...,"mean_ms":...,"p50_ms":...,"p95_ms":...},"target_verify":{...},"target_only_single_token_decode":{...}}}
 ```
 
 ```bash
@@ -313,6 +313,8 @@ rg 'CUDA_EVENT_PROFILE' results/*.server.log results/*/server.log
 - `target_only_single_token_decode`：无 speculative config 的纯单-token decode batch，边界同上。
 
 prefill、混合 prefill/decode batch，以及只有部分请求携带 draft token 的混合 batch 不计入这三项。
+EngineCore shutdown 即使零样本或 profiler 已禁用也会输出诊断 JSON；`pending_counts` 和
+`elapsed_counts` 是最终同步前的状态，`final_elapsed_counts` 是同步后的可统计样本数。
 CUDA Event profiler 位于 vLLM worker，因而也会看到 harness 的 warm-up 请求；做严格的 measured-only
 采样时，可将 `warmup_requests=0`，并在正式实验前另跑一次 smoke warm-up。profiling 本身会增加少量
 Event 记录开销，因此端到端吞吐结论仍应以关闭该开关的正式运行结果为准。

@@ -69,6 +69,14 @@ server start representative. Complete one smoke run before collecting repeated m
 
 Confirm that the rendered command contains `EQC_DFLASH_CUDA_PROFILE=1`, let the harness stop
 the managed server normally, and inspect the complete server log. The report is emitted from
-the V1 EngineCore shutdown path before model-executor teardown, and only after at least one
-qualifying phase was recorded. Target-only prefill and multi-token batches do not count as
-single-token decode; mixed DFlash verify/prefill batches are deliberately excluded as well.
+the V1 EngineCore shutdown path before model-executor teardown, including when no qualifying
+phase was recorded. Target-only prefill and multi-token batches do not count as single-token
+decode; mixed DFlash verify/prefill batches are deliberately excluded as well.
+
+The shutdown record is emitted even with zero samples. Interpret its `diagnostics` fields in
+order: `propose_hook_calls=0` means the proposer wrapper was never entered;
+`target_phase_matches=0` means no pure verify/single-token batch matched; lower `begin_calls`
+than matched hooks means target model forward was not reached; lower `finish_calls` than
+`begin_calls` means a measured call did not complete. `pending_counts` and `elapsed_counts`
+describe state before final synchronization, while `final_elapsed_counts` describes the
+samples available to the reported percentiles. If `disabled=true`, inspect `disable_reason`.

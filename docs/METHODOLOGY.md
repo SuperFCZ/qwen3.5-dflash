@@ -86,7 +86,8 @@ model forward and end after rejection/ordinary sampling, respectively. Events ar
 opportunistically only after completion and synchronized once for the final report; no
 per-step synchronization is introduced. Only pure verify or pure single-token decode batches
 are classified. The server-side profiler includes harness warm-up requests, unlike the
-Prometheus counter deltas and end-to-end benchmark aggregates.
+Prometheus counter deltas and end-to-end benchmark aggregates. EngineCore shutdown always
+emits the diagnostic counters, including for zero samples or a disabled profiler.
 
 ## 5. Correctness gate
 

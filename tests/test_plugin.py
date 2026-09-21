@@ -1,6 +1,7 @@
 # ruff: noqa: E402, I001
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -139,6 +140,76 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(summary["p50_ms"], 2.5)
         self.assertEqual(summary["p95_ms"], 3.85)
 
+    def test_forced_cuda_profile_report_includes_zero_sample_diagnostics(self) -> None:
+        torch = _FakeTorch()
+        emitted = []
+        profiler = CudaEventProfiler(emitted.append, torch_module=torch)
+
+        payload = profiler.report(force=True, trigger="engine_core_shutdown")
+
+        self.assertEqual(torch.cuda.synchronize_calls, 0)
+        self.assertEqual(payload["trigger"], "engine_core_shutdown")
+        self.assertEqual(
+            payload["diagnostics"],
+            {
+                "propose_hook_calls": 0,
+                "target_phase_matches": 0,
+                "target_phase_matches_by_phase": {
+                    TARGET_VERIFY: 0,
+                    TARGET_ONLY_DECODE: 0,
+                },
+                "begin_calls": 0,
+                "finish_calls": 0,
+                "pending_counts": {
+                    DFLASH_PROPOSAL: 0,
+                    TARGET_VERIFY: 0,
+                    TARGET_ONLY_DECODE: 0,
+                    "total": 0,
+                },
+                "elapsed_counts": {
+                    DFLASH_PROPOSAL: 0,
+                    TARGET_VERIFY: 0,
+                    TARGET_ONLY_DECODE: 0,
+                    "total": 0,
+                },
+                "final_elapsed_counts": {
+                    DFLASH_PROPOSAL: 0,
+                    TARGET_VERIFY: 0,
+                    TARGET_ONLY_DECODE: 0,
+                    "total": 0,
+                },
+                "disabled": False,
+                "disable_reason": None,
+            },
+        )
+        self.assertEqual(len(emitted), 1)
+        self.assertIsNone(profiler.report(force=True, trigger="atexit"))
+
+    def test_forced_cuda_profile_report_survives_disabled_profiler(self) -> None:
+        class BrokenEvent:
+            def __init__(self, *, enable_timing):
+                raise RuntimeError("event unavailable")
+
+        torch = SimpleNamespace(
+            cuda=SimpleNamespace(
+                Event=BrokenEvent,
+                current_device=lambda: 0,
+                synchronize=lambda: None,
+            )
+        )
+        emitted = []
+        profiler = CudaEventProfiler(emitted.append, torch_module=torch)
+        pair = profiler.begin()
+        profiler.finish(DFLASH_PROPOSAL, pair)
+
+        payload = profiler.report(force=True, trigger="engine_core_shutdown")
+
+        self.assertTrue(payload["diagnostics"]["disabled"])
+        self.assertEqual(payload["diagnostics"]["begin_calls"], 1)
+        self.assertEqual(payload["diagnostics"]["finish_calls"], 1)
+        profile_lines = [line for line in emitted if line.startswith("CUDA_EVENT_PROFILE ")]
+        self.assertEqual(len(profile_lines), 1)
+
     def test_target_phase_requires_a_pure_decode_or_verify_batch(self) -> None:
         runner = SimpleNamespace(speculative_config=None)
         decode = SimpleNamespace(
@@ -242,9 +313,20 @@ class PluginTests(unittest.TestCase):
         profile_lines = [line for line in emitted if line.startswith("CUDA_EVENT_PROFILE ")]
         self.assertEqual(len(profile_lines), 1)
         profile_line = profile_lines[0]
+        profile_payload = json.loads(profile_line.removeprefix("CUDA_EVENT_PROFILE "))
         self.assertIn('"dflash_proposal":{"count":1', profile_line)
         self.assertIn('"target_verify":{"count":1', profile_line)
         self.assertIn('"target_only_single_token_decode":{"count":1', profile_line)
+        self.assertEqual(profile_payload["trigger"], "engine_core_shutdown")
+        diagnostics = profile_payload["diagnostics"]
+        self.assertEqual(diagnostics["propose_hook_calls"], 1)
+        self.assertEqual(diagnostics["target_phase_matches"], 2)
+        self.assertEqual(diagnostics["begin_calls"], 3)
+        self.assertEqual(diagnostics["finish_calls"], 3)
+        self.assertEqual(diagnostics["pending_counts"]["total"], 3)
+        self.assertEqual(diagnostics["elapsed_counts"]["total"], 0)
+        self.assertEqual(diagnostics["final_elapsed_counts"]["total"], 3)
+        self.assertFalse(diagnostics["disabled"])
         self.assertEqual(
             lifecycle,
             [profile_line, "model-executor-release", "runner-shutdown"],
