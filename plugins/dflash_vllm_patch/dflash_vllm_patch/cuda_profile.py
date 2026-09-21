@@ -200,6 +200,7 @@ def install_cuda_event_profiling(
     *,
     runner_module: Any | None = None,
     dflash_module: Any | None = None,
+    engine_core_module: Any | None = None,
     profiler: CudaEventProfiler | None = None,
 ) -> CudaEventProfiler:
     """Patch vLLM phase boundaries while preserving their return values."""
@@ -207,9 +208,12 @@ def install_cuda_event_profiling(
         import vllm.v1.worker.gpu_model_runner as runner_module
     if dflash_module is None:
         import vllm.v1.spec_decode.dflash as dflash_module
+    if engine_core_module is None:
+        import vllm.v1.engine.core as engine_core_module
 
     runner_class = runner_module.GPUModelRunner
     proposer_class = dflash_module.DFlashProposer
+    engine_core_class = engine_core_module.EngineCore
     existing = getattr(runner_class, "_eqc_cuda_event_profiler", None)
     if existing is not None:
         return existing
@@ -280,12 +284,21 @@ def install_cuda_event_profiling(
         profiler.report()
         return original_shutdown(self, *args, **kwargs)
 
+    original_engine_core_shutdown = engine_core_class.shutdown
+
+    @functools.wraps(original_engine_core_shutdown)
+    def engine_core_shutdown(self: Any, *args: Any, **kwargs: Any) -> Any:
+        # EngineCore.shutdown tears down model_executor first in vLLM 0.22.1.
+        profiler.report()
+        return original_engine_core_shutdown(self, *args, **kwargs)
+
     runner_class.execute_model = execute_model
     runner_class._model_forward = model_forward
     runner_class._sample = sample
     runner_class.shutdown = shutdown
     runner_class._eqc_cuda_event_profiler = profiler
     proposer_class.propose = propose
+    engine_core_class.shutdown = engine_core_shutdown
     atexit.register(profiler.report)
     return profiler
 

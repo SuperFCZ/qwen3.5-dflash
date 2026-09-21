@@ -169,6 +169,8 @@ class PluginTests(unittest.TestCase):
         self.assertIsNone(_target_phase(runner, mixed))
 
     def test_cuda_profile_patches_preserve_results_and_report_together(self) -> None:
+        lifecycle = []
+
         class Runner:
             def __init__(self):
                 self.speculative_config = None
@@ -184,19 +186,31 @@ class PluginTests(unittest.TestCase):
                 return "sample-result"
 
             def shutdown(self):
+                lifecycle.append("runner-shutdown")
                 return "shutdown-result"
 
         class DFlashProposer:
             def propose(self):
                 return "proposal-result"
 
+        class EngineCore:
+            def shutdown(self):
+                lifecycle.append("model-executor-release")
+                return "engine-shutdown-result"
+
         torch = _FakeTorch()
         emitted = []
-        profiler = CudaEventProfiler(emitted.append, torch_module=torch)
+
+        def emit(message):
+            emitted.append(message)
+            lifecycle.append(message)
+
+        profiler = CudaEventProfiler(emit, torch_module=torch)
         install_cuda_event_profiling(
-            emitted.append,
+            emit,
             runner_module=SimpleNamespace(GPUModelRunner=Runner),
             dflash_module=SimpleNamespace(DFlashProposer=DFlashProposer),
+            engine_core_module=SimpleNamespace(EngineCore=EngineCore),
             profiler=profiler,
         )
 
@@ -220,14 +234,21 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(DFlashProposer().propose(), "proposal-result")
         self.assertEqual(torch.cuda.synchronize_calls, 0)
 
+        self.assertEqual(EngineCore().shutdown(), "engine-shutdown-result")
         self.assertEqual(runner.shutdown(), "shutdown-result")
         self.assertEqual(torch.cuda.synchronize_calls, 1)
         payload = profiler.report()
         self.assertIsNone(payload)
-        profile_line = next(line for line in emitted if line.startswith("CUDA_EVENT_PROFILE "))
+        profile_lines = [line for line in emitted if line.startswith("CUDA_EVENT_PROFILE ")]
+        self.assertEqual(len(profile_lines), 1)
+        profile_line = profile_lines[0]
         self.assertIn('"dflash_proposal":{"count":1', profile_line)
         self.assertIn('"target_verify":{"count":1', profile_line)
         self.assertIn('"target_only_single_token_decode":{"count":1', profile_line)
+        self.assertEqual(
+            lifecycle,
+            [profile_line, "model-executor-release", "runner-shutdown"],
+        )
 
 
 if __name__ == "__main__":

@@ -294,7 +294,8 @@ EQC_DFLASH_CUDA_PROFILE = "1"
 量化草稿配置已有 `[server.environment]`，直接在同一节追加这一行；target-only 配置则新建该节。
 也可以只对单次命令临时开启，例如
 `EQC_DFLASH_CUDA_PROFILE=1 dflash-bench run configs/w8_draft.toml --output results/profile.json`。
-插件只记录 CUDA Event，不在每个 decode step 同步。vLLM worker shutdown 时统一同步一次，并在
+插件只记录 CUDA Event，不在每个 decode step 同步。vLLM V1 EngineCore shutdown 时、释放
+model executor 之前统一同步一次，并在
 `*.server.log`（目录输入模式为 `server.log`）输出一行机器可读 JSON：
 
 ```text
