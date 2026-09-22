@@ -79,14 +79,14 @@ Performance metrics have different meanings:
 - Peak VRAM is sampled after server readiness; it is runtime residency, not load peak.
 
 The opt-in CUDA Event profiler (`EQC_DFLASH_CUDA_PROFILE=1`) reports three GPU timeline
-intervals from the V1 EngineCore shutdown path, before it releases the model executor.
+intervals from the V1 EngineCoreProc shutdown path, before it releases the model executor.
 `dflash_proposal` wraps the full DFlash proposer.
 `target_verify` and `target_only_single_token_decode` start immediately before the target
 model forward and end after rejection/ordinary sampling, respectively. Events are resolved
 opportunistically only after completion and synchronized once for the final report; no
 per-step synchronization is introduced. Only pure verify or pure single-token decode batches
 are classified. The server-side profiler includes harness warm-up requests, unlike the
-Prometheus counter deltas and end-to-end benchmark aggregates. EngineCore shutdown always
+Prometheus counter deltas and end-to-end benchmark aggregates. EngineCoreProc shutdown always
 emits the diagnostic counters, including for zero samples or a disabled profiler.
 
 ## 5. Correctness gate

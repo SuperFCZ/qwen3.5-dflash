@@ -272,6 +272,7 @@ def install_cuda_event_profiling(
     runner_class = runner_module.GPUModelRunner
     proposer_class = dflash_module.DFlashProposer
     engine_core_class = engine_core_module.EngineCore
+    engine_core_proc_class = engine_core_module.EngineCoreProc
     existing = getattr(runner_class, "_eqc_cuda_event_profiler", None)
     if existing is not None:
         return existing
@@ -346,12 +347,18 @@ def install_cuda_event_profiling(
         return original_shutdown(self, *args, **kwargs)
 
     original_engine_core_shutdown = engine_core_class.shutdown
+    original_engine_core_proc_shutdown = engine_core_proc_class.shutdown
 
     @functools.wraps(original_engine_core_shutdown)
     def engine_core_shutdown(self: Any, *args: Any, **kwargs: Any) -> Any:
         # EngineCore.shutdown tears down model_executor first in vLLM 0.22.1.
         profiler.report(force=True, trigger="engine_core_shutdown")
         return original_engine_core_shutdown(self, *args, **kwargs)
+
+    @functools.wraps(original_engine_core_proc_shutdown)
+    def engine_core_proc_shutdown(self: Any, *args: Any, **kwargs: Any) -> Any:
+        profiler.report(force=True, trigger="engine_core_proc_shutdown")
+        return original_engine_core_proc_shutdown(self, *args, **kwargs)
 
     runner_class.execute_model = execute_model
     runner_class._model_forward = model_forward
@@ -360,6 +367,7 @@ def install_cuda_event_profiling(
     runner_class._eqc_cuda_event_profiler = profiler
     proposer_class.propose = propose
     engine_core_class.shutdown = engine_core_shutdown
+    engine_core_proc_class.shutdown = engine_core_proc_shutdown
     atexit.register(functools.partial(profiler.report, trigger="atexit"))
     return profiler
 

@@ -239,7 +239,7 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(_target_phase(runner, verify), TARGET_VERIFY)
         self.assertIsNone(_target_phase(runner, mixed))
 
-    def test_cuda_profile_patches_preserve_results_and_report_together(self) -> None:
+    def test_engine_core_proc_shutdown_reports_once_before_release(self) -> None:
         lifecycle = []
 
         class Runner:
@@ -269,6 +269,9 @@ class PluginTests(unittest.TestCase):
                 lifecycle.append("model-executor-release")
                 return "engine-shutdown-result"
 
+        class EngineCoreProc(EngineCore):
+            pass
+
         torch = _FakeTorch()
         emitted = []
 
@@ -281,7 +284,10 @@ class PluginTests(unittest.TestCase):
             emit,
             runner_module=SimpleNamespace(GPUModelRunner=Runner),
             dflash_module=SimpleNamespace(DFlashProposer=DFlashProposer),
-            engine_core_module=SimpleNamespace(EngineCore=EngineCore),
+            engine_core_module=SimpleNamespace(
+                EngineCore=EngineCore,
+                EngineCoreProc=EngineCoreProc,
+            ),
             profiler=profiler,
         )
 
@@ -305,7 +311,7 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(DFlashProposer().propose(), "proposal-result")
         self.assertEqual(torch.cuda.synchronize_calls, 0)
 
-        self.assertEqual(EngineCore().shutdown(), "engine-shutdown-result")
+        self.assertEqual(EngineCoreProc().shutdown(), "engine-shutdown-result")
         self.assertEqual(runner.shutdown(), "shutdown-result")
         self.assertEqual(torch.cuda.synchronize_calls, 1)
         payload = profiler.report()
@@ -317,7 +323,7 @@ class PluginTests(unittest.TestCase):
         self.assertIn('"dflash_proposal":{"count":1', profile_line)
         self.assertIn('"target_verify":{"count":1', profile_line)
         self.assertIn('"target_only_single_token_decode":{"count":1', profile_line)
-        self.assertEqual(profile_payload["trigger"], "engine_core_shutdown")
+        self.assertEqual(profile_payload["trigger"], "engine_core_proc_shutdown")
         diagnostics = profile_payload["diagnostics"]
         self.assertEqual(diagnostics["propose_hook_calls"], 1)
         self.assertEqual(diagnostics["target_phase_matches"], 2)

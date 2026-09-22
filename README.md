@@ -294,7 +294,7 @@ EQC_DFLASH_CUDA_PROFILE = "1"
 量化草稿配置已有 `[server.environment]`，直接在同一节追加这一行；target-only 配置则新建该节。
 也可以只对单次命令临时开启，例如
 `EQC_DFLASH_CUDA_PROFILE=1 dflash-bench run configs/w8_draft.toml --output results/profile.json`。
-插件只记录 CUDA Event，不在每个 decode step 同步。vLLM V1 EngineCore shutdown 时、释放
+插件只记录 CUDA Event，不在每个 decode step 同步。vLLM V1 `EngineCoreProc.shutdown` 时、释放
 model executor 之前统一同步一次，并在
 `*.server.log`（目录输入模式为 `server.log`）输出一行机器可读 JSON：
 
@@ -313,7 +313,7 @@ rg 'CUDA_EVENT_PROFILE' results/*.server.log results/*/server.log
 - `target_only_single_token_decode`：无 speculative config 的纯单-token decode batch，边界同上。
 
 prefill、混合 prefill/decode batch，以及只有部分请求携带 draft token 的混合 batch 不计入这三项。
-EngineCore shutdown 即使零样本或 profiler 已禁用也会输出诊断 JSON；`pending_counts` 和
+EngineCoreProc shutdown 即使零样本或 profiler 已禁用也会输出诊断 JSON；`pending_counts` 和
 `elapsed_counts` 是最终同步前的状态，`final_elapsed_counts` 是同步后的可统计样本数。
 CUDA Event profiler 位于 vLLM worker，因而也会看到 harness 的 warm-up 请求；做严格的 measured-only
 采样时，可将 `warmup_requests=0`，并在正式实验前另跑一次 smoke warm-up。profiling 本身会增加少量
