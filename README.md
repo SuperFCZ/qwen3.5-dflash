@@ -284,40 +284,46 @@ vLLM 0.22.1 的 DFlash 实现存在直接读取线性层浮点 `.weight` 的路�
 
 ### CUDA Event 分阶段计时
 
-需要区分草稿开销与目标验证开销时，在待测 TOML 中开启：
+先在运行 vLLM 的 Python 3.12 环境更新插件（本次实现为 0.3.0）：
 
-```toml
-[server.environment]
-EQC_DFLASH_CUDA_PROFILE = "1"
+```bash
+python -m pip install --no-deps -e plugins/dflash_vllm_patch
+EQC_DFLASH_CUDA_PROFILE=1 dflash-bench run configs/w4_draft_full.toml --concurrency 1 --output results/w4-profile.json
+EQC_DFLASH_CUDA_PROFILE=1 dflash-bench run configs/w8_draft.toml --concurrency 1 --output results/w8-profile.json
+EQC_DFLASH_CUDA_PROFILE=1 dflash-bench run configs/w4_target_only.toml --concurrency 1 --output results/w4-target-profile.json
 ```
 
-量化草稿配置已有 `[server.environment]`，直接在同一节追加这一行；target-only 配置则新建该节。
-也可以只对单次命令临时开启，例如
-`EQC_DFLASH_CUDA_PROFILE=1 dflash-bench run configs/w8_draft.toml --output results/profile.json`。
-插件只记录 CUDA Event，不在每个 decode step 同步。vLLM V1 `EngineCoreProc.shutdown` 时、释放
-model executor 之前统一同步一次，并在
-`*.server.log`（目录输入模式为 `server.log`）输出一行机器可读 JSON：
+也可在待测 TOML 的 `[server.environment]` 中设置 `EQC_DFLASH_CUDA_PROFILE = "1"`。
+开关关闭时不安装这些计时/控制接口。开启后，collector 在实际 GPU worker 的 `init_device`
+完成后绑定到 runner 实例；日志中的 `registered` 仅代表插件注册，`worker_ready` 才代表已绑定。
+运行期间每 5 秒通过 `Event.query()` 输出 `CUDA_EVENT_PROFILE` 累计快照，空闲时也能收集尾部 Event。
+不逐 step synchronize，不依赖 EngineCore shutdown 或 atexit。
 
-```text
-[dflash_vllm_patch] CUDA_EVENT_PROFILE {"clock":"cuda_event","diagnostics":{"propose_hook_calls":...,"target_phase_matches":...,"begin_calls":...,"finish_calls":...,"pending_counts":{...},"elapsed_counts":{...},"disabled":false},"metrics":{"dflash_proposal":{"count":...,"mean_ms":...,"p50_ms":...,"p95_ms":...},"target_verify":{...},"target_only_single_token_decode":{...}}}
-```
+基准会在 **warm-up 后 start/reset、测量完成后 stop/flush**，通过 HTTP → EngineCore → worker RPC
+收齐 Event；同步只发生在这两个测量窗口边界，stop 在发送退出信号之前完成。
+最终统计写入结果 JSON 的 `cuda_event_profile`（按 worker 分列），也打印到终端和 server log。
+目录输入模式对每个 JSONL 文件独立重置、收集；`--no-launch` 同样支持，但已有服务也必须开启插件。
+控制接口缺失、禁用、失败或最终 Event 未收齐会明确报错。
+
+每项包含 `count/mean_ms/p50_ms/p95_ms`：
+
+- `dflash_proposal`：一次完整并行 proposal，固定产生 15 个候选，包括 context-K/V、一次 draft forward 和采样；排除 prefill 上下文的首轮 proposal。
+- `target_verify`：每个请求恰好调度 15 候选 + 1 token 的纯 verify batch，从 target forward 开始，到 rejection sampling 完成。
+- `target_only_single_token_decode`：无 speculative config，所有请求均已完成 prefill、每请求仅调度 1 token，从 target forward 到普通采样完成。
+
+prefill、混合批次、缩短的 verify 尾批次不计入对应统计。`count` 是 **batch 调用次数**，不是 token 数；
+单请求 latency 使用 `--concurrency 1`。量化方式从实际模型配置写入 metadata；
+`w8_target_only.toml` 是 **BF16 target 的 W8 实验基线**，并非量化 W8 target；现有量化 target-only 配置是 W4。
 
 ```bash
 rg 'CUDA_EVENT_PROFILE' results/*.server.log results/*/server.log
+python -c 'import json; print(json.dumps(json.load(open("results/w4-profile.json"))["cuda_event_profile"], indent=2))'
 ```
 
-三个区间的口径如下：
-
-- `dflash_proposal`：完整 `DFlashProposer.propose`，包括 context-K/V 预计算、草稿 forward 和草稿采样；
-- `target_verify`：纯 DFlash verify batch，从目标模型 forward 开始，到 rejection sampling 结束；
-- `target_only_single_token_decode`：无 speculative config 的纯单-token decode batch，边界同上。
-
-prefill、混合 prefill/decode batch，以及只有部分请求携带 draft token 的混合 batch 不计入这三项。
-EngineCoreProc shutdown 即使零样本或 profiler 已禁用也会输出诊断 JSON；`pending_counts` 和
-`elapsed_counts` 是最终同步前的状态，`final_elapsed_counts` 是同步后的可统计样本数。
-CUDA Event profiler 位于 vLLM worker，因而也会看到 harness 的 warm-up 请求；做严格的 measured-only
-采样时，可将 `warmup_requests=0`，并在正式实验前另跑一次 smoke warm-up。profiling 本身会增加少量
-Event 记录开销，因此端到端吞吐结论仍应以关闭该开关的正式运行结果为准。
+这些是 CUDA stream 时间轴区间，包含区间内的 GPU 空闲/CPU 发射间隔，并非 kernel duration 之和。
+支持 0.22.1 原有 runner（eager 和 CUDA Graph replay）、PP=1、DP=1、关闭 DBO；其他 runner/并行模式
+会明确诊断，不静默输出伪测量。周期快照是同一窗口的累计值，不能相加；以 `final=true` 的结果为准。
+独立手动服务、进程路径分析、统计口径和 GPU 验收步骤见 [CUDA Event profiling](docs/CUDA_EVENT_PROFILING.md)。
 
 ## 测试
 

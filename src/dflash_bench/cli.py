@@ -110,6 +110,13 @@ def _print_aggregate(label: str, result: dict) -> None:
     throughput = aggregate["output_throughput_tokens_per_s"]
     throughput_text = f"{throughput:.2f}" if throughput is not None else "n/a"
     print(f"{label}: completed {completed}/{planned}; {throughput_text} output tok/s")
+    for record in result.get("cuda_event_profile") or []:
+        print(f"CUDA Event worker pid={record['pid']} device={record['device']} (ms per batch):")
+        for phase, stats in record["metrics"].items():
+            print(
+                f"  {phase}: count={stats['count']} mean={stats['mean_ms']} "
+                f"p50={stats['p50_ms']} p95={stats['p95_ms']}"
+            )
 
 
 def _validate_base_url(value: str) -> str:

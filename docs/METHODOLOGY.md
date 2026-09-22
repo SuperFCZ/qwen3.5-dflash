@@ -78,16 +78,24 @@ Performance metrics have different meanings:
 - Request/s is useful only when output lengths are held comparable.
 - Peak VRAM is sampled after server readiness; it is runtime residency, not load peak.
 
-The opt-in CUDA Event profiler (`EQC_DFLASH_CUDA_PROFILE=1`) reports three GPU timeline
-intervals from the V1 EngineCoreProc shutdown path, before it releases the model executor.
-`dflash_proposal` wraps the full DFlash proposer.
-`target_verify` and `target_only_single_token_decode` start immediately before the target
-model forward and end after rejection/ordinary sampling, respectively. Events are resolved
-opportunistically only after completion and synchronized once for the final report; no
-per-step synchronization is introduced. Only pure verify or pure single-token decode batches
-are classified. The server-side profiler includes harness warm-up requests, unlike the
-Prometheus counter deltas and end-to-end benchmark aggregates. EngineCoreProc shutdown always
-emits the diagnostic counters, including for zero samples or a disabled profiler.
+The opt-in CUDA Event profiler (`EQC_DFLASH_CUDA_PROFILE=1`) is owned by the actual
+GPU worker. It reports periodic nonblocking snapshots and an explicit final worker RPC
+result before server shutdown. `dflash_proposal` wraps one parallel proposal of 15 tokens
+(including context-K/V preprocessing, forward and sampling), excluding prefill-context
+proposals. `target_verify` requires 15 scheduled candidates plus one token per request.
+It starts immediately before target forward and ends after rejection sampling, before the
+draft proposal. `target_only_single_token_decode` uses the same boundaries with ordinary
+sampling and additionally checks that prefill is complete from the prepared input batch.
+Mixed and truncated verify batches are excluded. These are GPU stream timeline intervals,
+including host dispatch gaps/stream idle time, not the sum of kernel execution durations.
+
+The harness resets after its own warm-up and flushes after measured requests, outside the
+wall-time interval. No per-step CUDA synchronization is added. The final worker records are
+saved under `cuda_event_profile` in each result JSON. All metrics are per batch invocation,
+not per token; use concurrency 1 for single-request latency. `count` counts completed event
+pairs and percentiles use linear interpolation. Do not add cumulative snapshots or average
+worker percentiles. Runs without explicit start include all requests since worker startup.
+Read [the profiling guide](CUDA_EVENT_PROFILING.md) for process-path details and GPU checks.
 
 ## 5. Correctness gate
 

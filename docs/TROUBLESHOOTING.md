@@ -67,16 +67,27 @@ server start representative. Complete one smoke run before collecting repeated m
 
 ## No `CUDA_EVENT_PROFILE` line appears
 
-Confirm that the rendered command contains `EQC_DFLASH_CUDA_PROFILE=1`, let the harness stop
-the managed server normally, and inspect the complete server log. The report is emitted from
-the V1 EngineCoreProc shutdown path before model-executor teardown, including when no qualifying
-phase was recorded. Target-only prefill and multi-token batches do not count as single-token
-decode; mixed DFlash verify/prefill batches are deliberately excluded as well.
+Use plugin 0.3.0 or later in the **same Python environment as vLLM**, then restart the
+server. `registered` includes PID, detected vLLM version and plugin path; it is not evidence
+of GPU execution. Look for the worker's `CUDA_EVENT_PROFILE` with `trigger=worker_ready`
+and check its actual runner/rank/model metadata. `unsupported_runner` means the plugin
+refused an unvalidated execution path (including V2 runner, PP/DP > 1, DBO or DFlash k != 15).
 
-The shutdown record is emitted even with zero samples. Interpret its `diagnostics` fields in
-order: `propose_hook_calls=0` means the proposer wrapper was never entered;
-`target_phase_matches=0` means no pure verify/single-token batch matched; lower `begin_calls`
-than matched hooks means target model forward was not reached; lower `finish_calls` than
-`begin_calls` means a measured call did not complete. `pending_counts` and `elapsed_counts`
-describe state before final synchronization, while `final_elapsed_counts` describes the
-samples available to the reported percentiles. If `disabled=true`, inspect `disable_reason`.
+The worker emits a nonblocking snapshot every 5 seconds, including while idle. An explicit
+`POST /eqc_cuda_profile/stop` returns final worker summaries while they are still alive;
+`dflash-bench run` does this automatically and stores them in the result JSON. Neither
+EngineCore shutdown nor Python atexit is required for this export. A 404 means the API
+process did not load the updated plugin/flag; an RPC error means the worker is missing it
+or collection failed. Do not continue benchmarking an old server after changing the plugin.
+
+Inspect `diagnostics.calls`: `execute_calls`, `forward_calls`, `sample_calls`,
+`propose_calls`, `target_phase_matches`, `begin_calls` and `finish_calls`. No matched phase
+can be legitimate for prefill, mixed batches or short outputs. `prefill_proposal_skips`,
+`proposal_shape_skips`, `capture_skips` and `abandoned_targets` explain skipped work.
+`pending_counts` reports recorded but unresolved pairs, and must be zero in a complete
+final report. `disabled` and `disable_reason` identify CUDA failures. Empty distributions
+have count 0 and null latencies, never fabricated zero-millisecond timings.
+
+See [CUDA Event profiling](CUDA_EVENT_PROFILING.md) for lifecycle analysis, manual RPC/HTTP
+commands and a GPU validation checklist. Abrupt termination can lose events since the last
+snapshot; only a successful explicit stop guarantees the tail was collected.

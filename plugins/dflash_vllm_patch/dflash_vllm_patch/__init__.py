@@ -246,7 +246,14 @@ def register() -> None:
             from .cuda_profile import install_cuda_event_profiling
 
             install_cuda_event_profiling(_log)
-            _log("CUDA Event profiling active")
+            from .cuda_profile_api import install_api_route
+
+            install_api_route()
+            _log(
+                f"CUDA Event profiling registered pid={os.getpid()} "
+                f"vllm={detected_version} plugin={__file__}; "
+                "waiting for worker_ready (registration is not a GPU sample)"
+            )
         except Exception as exc:  # pragma: no cover - only exercised in the GPU env
             _log(f"could not install CUDA Event profiling: {type(exc).__name__}: {exc}")
 

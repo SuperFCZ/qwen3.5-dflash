@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from . import cuda_profile
 from .client import CompletionResult, chat_completion
 from .config import ExperimentConfig, config_as_dict, render_shell_command
 from .gpu import GpuMonitor
@@ -213,37 +214,45 @@ def run_benchmark(
         except Exception as exc:  # keep the measured run useful when a single warmup fails
             warmup_errors.append(f"{type(exc).__name__}: {exc}")
 
-    before = parse_prometheus(fetch_metrics(base_url))
+    profiling = cuda_profile.enabled(config)
+    if profiling:
+        cuda_profile.control(base_url, "start")
     jobs = [(prompt, repetition) for repetition in range(bench.repetitions) for prompt in prompts]
     results: list[CompletionResult] = []
     errors: list[dict[str, Any]] = []
-    start = time.perf_counter()
-    with GpuMonitor(bench.gpu_index, bench.gpu_poll_interval_s) as monitor:
-        with ThreadPoolExecutor(max_workers=bench.concurrency) as executor:
-            future_to_job = {
-                executor.submit(_one_request, config, base_url, prompt, repetition): (
-                    prompt,
-                    repetition,
-                )
-                for prompt, repetition in jobs
-            }
-            for future in as_completed(future_to_job):
-                prompt, repetition = future_to_job[future]
-                try:
-                    results.append(future.result())
-                except Exception as exc:
-                    errors.append(
-                        {
-                            "prompt_id": prompt.prompt_id,
-                            "repetition": repetition,
-                            "input_field": prompt.input_field,
-                            "input": prompt.text,
-                            "source_record": prompt.source_record,
-                            "error": f"{type(exc).__name__}: {exc}",
-                        }
+    profile_records = None
+    try:
+        before = parse_prometheus(fetch_metrics(base_url))
+        start = time.perf_counter()
+        with GpuMonitor(bench.gpu_index, bench.gpu_poll_interval_s) as monitor:
+            with ThreadPoolExecutor(max_workers=bench.concurrency) as executor:
+                future_to_job = {
+                    executor.submit(_one_request, config, base_url, prompt, repetition): (
+                        prompt,
+                        repetition,
                     )
-    wall_s = time.perf_counter() - start
-    after = parse_prometheus(fetch_metrics(base_url))
+                    for prompt, repetition in jobs
+                }
+                for future in as_completed(future_to_job):
+                    prompt, repetition = future_to_job[future]
+                    try:
+                        results.append(future.result())
+                    except Exception as exc:
+                        errors.append(
+                            {
+                                "prompt_id": prompt.prompt_id,
+                                "repetition": repetition,
+                                "input_field": prompt.input_field,
+                                "input": prompt.text,
+                                "source_record": prompt.source_record,
+                                "error": f"{type(exc).__name__}: {exc}",
+                            }
+                        )
+        wall_s = time.perf_counter() - start
+        after = parse_prometheus(fetch_metrics(base_url))
+    finally:
+        if profiling:
+            profile_records = cuda_profile.control(base_url, "stop")
     spec = speculative_stats(before, after)
 
     # Keep every prompt's repeated measurements adjacent in serialized results.
@@ -291,6 +300,7 @@ def run_benchmark(
         "aggregate": aggregate,
         "speculative": spec.as_dict() if spec else None,
         "gpu": monitor.summary(),
+        "cuda_event_profile": profile_records,
         "warmup_errors": warmup_errors,
         "errors": errors,
         "requests": request_records,
